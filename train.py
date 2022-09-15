@@ -13,22 +13,22 @@ from tqdm import tqdm
 
 from utils.data_loading import BasicDataset, CarvanaDataset
 from utils.dice_score import dice_loss
-from evaluate import evaluate
+from evaluate import evaluate_dice_score, evaluate_accuracy, evaluate_iou_score, evaluate_precision, evaluate_sensitivity, evaluate_specificity
 from unet import UNet
 
-dir_img = Path('./data/imgs/')
-dir_mask = Path('./data/masks/')
-dir_checkpoint = Path('./checkpoints/')
+dir_img = Path('/content/drive/MyDrive/caglar_abi_dataset/images/')
+dir_mask = Path('/content/drive/MyDrive/caglar_abi_dataset/masks/')
+dir_checkpoint = Path('./deneme/checkpoints/')
 
 
 def train_net(net,
               device,
               epochs: int = 5,
               batch_size: int = 1,
-              learning_rate: float = 1e-5,
+              learning_rate: float = 1e-4,
               val_percent: float = 0.1,
               save_checkpoint: bool = True,
-              img_scale: float = 0.5,
+              img_scale: float = 1.0,
               amp: bool = False):
     # 1. Create dataset
     try:
@@ -64,9 +64,16 @@ def train_net(net,
         Mixed Precision: {amp}
     ''')
 
+    # # 4. Set up the optimizer, the loss, the learning rate scheduler and the loss scaling for AMP
+    # optimizer = optim.RMSprop(net.parameters(), lr=learning_rate, weight_decay=1e-8, momentum=0.9)
+    # scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=int(epochs*0.3))  # goal: maximize Dice score
+
+  #YENİ ÇALIŞMA İÇİN
     # 4. Set up the optimizer, the loss, the learning rate scheduler and the loss scaling for AMP
-    optimizer = optim.RMSprop(net.parameters(), lr=learning_rate, weight_decay=1e-8, momentum=0.9)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=2)  # goal: maximize Dice score
+    optimizer = optim.SGD(net.parameters(), lr=learning_rate, weight_decay=0.0005, momentum=0.9)
+    # scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=int(0.3*epochs), gamma=0.1)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=int(epochs*0.3))  # goal: maximize Dice score
+
     grad_scaler = torch.cuda.amp.GradScaler(enabled=amp)
     criterion = nn.CrossEntropyLoss()
     global_step = 0
@@ -111,7 +118,7 @@ def train_net(net,
                 pbar.set_postfix(**{'loss (batch)': loss.item()})
 
                 # Evaluation round
-                division_step = (n_train // (10 * batch_size))
+                division_step = (n_train // (1 * batch_size))
                 if division_step > 0:
                     if global_step % division_step == 0:
                         histograms = {}
@@ -120,10 +127,32 @@ def train_net(net,
                             histograms['Weights/' + tag] = wandb.Histogram(value.data.cpu())
                             histograms['Gradients/' + tag] = wandb.Histogram(value.grad.data.cpu())
 
-                        val_score = evaluate(net, val_loader, device)
+                        val_score = evaluate_dice_score(net, val_loader, device)
                         scheduler.step(val_score)
 
+                        acc_score = evaluate_accuracy(net, val_loader, device)
+                        scheduler.step(acc_score)
+
+                        iou_score = evaluate_iou_score(net, val_loader, device)
+                        scheduler.step(iou_score)
+
+                        pre_score = evaluate_precision(net, val_loader, device)
+                        scheduler.step(pre_score)
+
+                        stv_score = evaluate_sensitivity(net, val_loader, device)
+                        scheduler.step(stv_score)
+
+                        spe_score = evaluate_specificity(net, val_loader, device)
+                        scheduler.step(spe_score)
+
+
                         logging.info('Validation Dice score: {}'.format(val_score))
+                        logging.info('Validation Accuracy score: {}'.format(acc_score))
+                        logging.info('Validation IoU score: {}'.format(iou_score))
+                        logging.info('Validation Precision score: {}'.format(pre_score))
+                        logging.info('Validation Sensitivity score: {}'.format(stv_score))
+                        logging.info('Validation Specificity score: {}'.format(spe_score))
+
                         experiment.log({
                             'learning rate': optimizer.param_groups[0]['lr'],
                             'validation Dice': val_score,
@@ -145,12 +174,12 @@ def train_net(net,
 
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images and target masks')
-    parser.add_argument('--epochs', '-e', metavar='E', type=int, default=5, help='Number of epochs')
+    parser.add_argument('--epochs', '-e', metavar='E', type=int, default=30, help='Number of epochs')
     parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=1, help='Batch size')
-    parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=1e-5,
+    parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=1e-4,
                         help='Learning rate', dest='lr')
     parser.add_argument('--load', '-f', type=str, default=False, help='Load model from a .pth file')
-    parser.add_argument('--scale', '-s', type=float, default=0.5, help='Downscaling factor of the images')
+    parser.add_argument('--scale', '-s', type=float, default=1.0, help='Downscaling factor of the images')
     parser.add_argument('--validation', '-v', dest='val', type=float, default=10.0,
                         help='Percent of the data that is used as validation (0-100)')
     parser.add_argument('--amp', action='store_true', default=False, help='Use mixed precision')
@@ -170,7 +199,7 @@ if __name__ == '__main__':
     # Change here to adapt to your data
     # n_channels=3 for RGB images
     # n_classes is the number of probabilities you want to get per pixel
-    net = UNet(n_channels=3, n_classes=args.classes, bilinear=args.bilinear)
+    net = UNet(n_channels=1, n_classes=2, bilinear=args.bilinear)
 
     logging.info(f'Network:\n'
                  f'\t{net.n_channels} input channels\n'
